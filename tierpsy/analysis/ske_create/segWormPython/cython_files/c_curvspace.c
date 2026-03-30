@@ -5,7 +5,7 @@
 double distance(double *x, double *y, int p_dim);
 void interpintv(double *pt1, double *pt2, int p_dim, double intv, double *newpt);
 
-inline int ind(m, d, ndim) {
+inline int ind(int m, int d, int ndim) {
     return m*ndim + d; 
 }
 double c_curvspace(double *points, int p_size, int p_dim, int N, double *output)

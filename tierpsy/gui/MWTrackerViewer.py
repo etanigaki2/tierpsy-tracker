@@ -113,15 +113,15 @@ class WellsDrawer(TrackerViewerAuxGUI):
                                  well['y_min'] + self.fontsize*1.2,
                                  well['well_name'])
                 # draw rectangle
-                painter.drawRect(well['x_min'],
-                                 well['y_min'],
-                                 well['x_max'] - well['x_min'],
-                                 well['y_max'] - well['y_min'])
+                painter.drawRect(int(well['x_min']),
+                                 int(well['y_min']),
+                                 int(well['x_max'] - well['x_min']),
+                                 int(well['y_max'] - well['y_min']))
                 if well['is_good_well'] == False:
-                    painter.drawLine(well['x_min'],
-                                     well['y_min'],
-                                     well['x_max'],
-                                     well['y_max'])
+                    painter.drawLine(int(well['x_min']),
+                                     int(well['y_min']),
+                                     int(well['x_max']),
+                                     int(well['y_max']))
             painter.end()
 
 
@@ -824,14 +824,14 @@ class MarkersDrawer(FeatureReaderBase):
 
         painter.drawText(x, y, str(worm_index))
 
-        bb = row_data['roi_size']
-        painter.drawRect(x - bb / 2, y - bb / 2, bb, bb)
+        bb = int(row_data['roi_size'])
+        painter.drawRect(int(x - bb / 2), int(y - bb / 2), bb, bb)
 
         if is_current_index:
 
             b_size = bb//5
             offset = bb/2 - b_size
-            painter.fillRect(x + offset, y + offset, b_size, b_size, QBrush(label_color))
+            painter.fillRect(int(x + offset), int(y + offset), b_size, b_size, QBrush(label_color))
 
     def draw_skeletons(self, painter, roi_id, row_data, is_current_index):
         if self.traj_worm_index_grouped is None:

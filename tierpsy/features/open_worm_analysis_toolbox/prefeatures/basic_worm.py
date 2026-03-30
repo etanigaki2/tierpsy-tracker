@@ -21,7 +21,8 @@ import tables
 
 
 import json
-from collections import namedtuple, Iterable, OrderedDict
+from collections import namedtuple, OrderedDict
+from collections.abc import Iterable
 
 from .. import config, utils
 from .pre_features import WormParsing

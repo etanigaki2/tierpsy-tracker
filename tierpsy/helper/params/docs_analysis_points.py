@@ -69,6 +69,26 @@ dflt_analysis_points['TIERPSY_AEX'] = dflt_analysis_points['BASE'] + ['FOOD_CNT'
 dflt_analysis_points['OPENWORM_SINGLE'] = dflt_analysis_points['OPENWORM']
 dflt_analysis_points['TIERPSY_SINGLE'] = dflt_analysis_points['TIERPSY']
 
+# CONSOLIDATE variants: run the full multi-worm pipeline, then merge all
+# trajectory fragments into a single worm ID (worm_index_joined=1).
+# Useful when one worm is present but may be detected as multiple fragments.
+_consolidate_base = [
+    'COMPRESS',
+    'TRAJ_CREATE',
+    'DETECT_CAM_ADJUST',
+    'TRAJ_JOIN',
+    'CONSOLIDATE_TRAJ',
+    'SKE_INIT',
+    'BLOB_FEATS',
+    'SKE_CREATE',
+    'SKE_FILT',
+    'SKE_ORIENT',
+    'INT_PROFILE',
+    'INT_SKE_ORIENT',
+]
+dflt_analysis_points['TIERPSY_CONSOLIDATE'] = _consolidate_base + dflt_analysis_points['TIERPSY_FEATURES']
+dflt_analysis_points['OPENWORM_CONSOLIDATE'] = _consolidate_base + dflt_analysis_points['OPENWORM_FEATURES']
+
 #only valid analysis points
 valid_analysis_types = list(sorted(dflt_analysis_points.keys()))
 

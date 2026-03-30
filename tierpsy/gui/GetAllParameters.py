@@ -123,8 +123,10 @@ class ParamWidget():
             raise ValueError('unknown type {}'.format(type(self.widget)))
 
     def write(self, value):
-        if isinstance(self.widget, (QDoubleSpinBox, QSpinBox)):
-            self.widget.setValue(value)
+        if isinstance(self.widget, QSpinBox):
+            self.widget.setValue(int(value))
+        elif isinstance(self.widget, QDoubleSpinBox):
+            self.widget.setValue(float(value))
         elif isinstance(self.widget, QCheckBox):
             self.widget.setChecked(value)
         elif isinstance(self.widget, QLineEdit):

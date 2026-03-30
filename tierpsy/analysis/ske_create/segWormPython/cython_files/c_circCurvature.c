@@ -5,7 +5,7 @@ inline double getSign(double x) {
     return (double)((0 < x) - (x < 0));
 }
 
-inline int ind(s1,s2){
+inline int ind(int s1, int s2){
     return 2*s1 + s2;
 }
 
