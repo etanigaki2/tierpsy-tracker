@@ -1,5 +1,7 @@
 import os
+import re
 import json
+import sys
 
 from PyQt5.QtWidgets import QApplication, QMainWindow, QFileDialog, QMessageBox
 
@@ -305,6 +307,49 @@ class BatchProcessing_GUI(QMainWindow):
         analysis_worker = WorkerFunQt(processMultipleFilesFun, process_args)
         progress = AnalysisProgress(analysis_worker)
         progress.exec_()
+
+        self._run_skel_error_report(process_args)
+
+    def _run_skel_error_report(self, process_args):
+        results_dir = process_args.get('results_dir_root', '')
+        if not results_dir or not os.path.isdir(results_dir):
+            return
+
+        json_file = process_args.get('json_file', '')
+
+        # Extract trailing number from the JSON filename (e.g. parameterMod17 → "17")
+        stem = os.path.splitext(os.path.basename(json_file))[0]
+        match = re.search(r'(\d+)\D*$', stem)
+        suffix = match.group(1) if match else ''
+
+        # Save next to the JSON file; fall back to the results dir if no JSON
+        if json_file and os.path.isfile(json_file):
+            out_dir = os.path.dirname(os.path.abspath(json_file))
+        else:
+            out_dir = results_dir
+
+        csv_name = f'skel_error_report{suffix}.csv'
+        csv_path = os.path.join(out_dir, csv_name)
+
+        try:
+            # skel_error_report.py lives alongside run_batch.sh
+            skel_report_dir = os.path.expanduser('~/real_data')
+            if skel_report_dir not in sys.path:
+                sys.path.insert(0, skel_report_dir)
+            from skel_error_report import generate_report_to_file
+            generate_report_to_file([results_dir], csv_path)
+
+            QMessageBox.information(
+                self,
+                'Skeletonisation Report',
+                f'Report saved to:\n{csv_path}',
+                QMessageBox.Ok)
+        except Exception as e:
+            QMessageBox.warning(
+                self,
+                'Skeletonisation Report Failed',
+                f'Batch processing finished, but the skeletonisation error report could not be generated:\n{e}',
+                QMessageBox.Ok)
 
 if __name__ == '__main__':
     import sys
