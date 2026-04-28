@@ -141,6 +141,78 @@ def isWormHTSwitched(skeletons, segment4angle, max_gap_allowed,
     return is_switch_skel, roll_std
 
 
+def _correct_omega_orientation_infile(skeletons_file):
+    """
+    Fix head/tail orientation of omega fallback frames directly in the HDF5
+    file using full-image coordinates (consistent reference frame).
+
+    Omega fallback frames are identified by contour_width[0] > 1: the normal
+    contour algorithm always sets endpoint width to exactly 0, while the
+    morphological thinning fallback uses perpendicular ray-casting (~5-8 px).
+
+    For each omega frame the two skeleton endpoints are compared to the nearest
+    preceding normal frame's head and tail positions.  The tail barely moves
+    during an omega turn so the combined head+tail distance score gives a
+    strong, reliable signal even when the head has swept a large arc.
+    """
+    LOOKBACK = 5   # number of preceding normal frames to average for reference
+
+    with tables.File(skeletons_file, 'r+') as f:
+        skel   = f.get_node('/skeleton')[:]
+        widths = f.get_node('/contour_width')[:]
+        side1  = f.get_node('/contour_side1')[:]
+        side2  = f.get_node('/contour_side2')[:]
+
+        is_omega = widths[:, 0] > 1.0
+        n = skel.shape[0]
+
+        ref_heads = []
+        ref_tails = []
+
+        for i in range(n):
+            if np.any(np.isnan(skel[i, 0, :])):
+                continue
+
+            if not is_omega[i]:
+                ref_heads.append(skel[i, 0, :].copy())
+                ref_tails.append(skel[i, -1, :].copy())
+                if len(ref_heads) > LOOKBACK:
+                    ref_heads.pop(0)
+                    ref_tails.pop(0)
+                continue
+
+            if not ref_heads:
+                continue
+
+            ref_head = np.mean(ref_heads, axis=0)
+            ref_tail = np.mean(ref_tails, axis=0)
+
+            A = skel[i, 0, :]
+            B = skel[i, -1, :]
+            score_correct = (np.sum((A - ref_head) ** 2) +
+                             np.sum((B - ref_tail) ** 2))
+            score_flipped = (np.sum((B - ref_head) ** 2) +
+                             np.sum((A - ref_tail) ** 2))
+
+            if score_flipped < score_correct:
+                skel[i]   = skel[i, ::-1, :]
+                widths[i] = widths[i, ::-1]
+                s1_tmp    = side1[i, ::-1, :].copy()
+                side2[i]  = side2[i, ::-1, :]
+                side1[i]  = s1_tmp
+
+            ref_heads.append(skel[i, 0, :].copy())
+            ref_tails.append(skel[i, -1, :].copy())
+            if len(ref_heads) > LOOKBACK:
+                ref_heads.pop(0)
+                ref_tails.pop(0)
+
+        f.get_node('/skeleton')[:]      = skel
+        f.get_node('/contour_width')[:] = widths
+        f.get_node('/contour_side1')[:] = side1
+        f.get_node('/contour_side2')[:] = side2
+
+
 def correctHeadTail(skeletons_file, **params):
     '''
     Correct Head Tail orientation using skeleton movement. Head must move more than the tail (have a higher rolling standar deviation). This might fail if the amount of contingously skeletonized frames is too little (a few seconds). Head must be in the first position of the single frame skeleton array, while the tail must be in the last.
@@ -188,8 +260,10 @@ def correctHeadTail(skeletons_file, **params):
 
         if not np.all(np.isnan(worm_data.skeleton_length)):
             is_switched_skel, roll_std = isWormHTSwitched(worm_data.skeleton,
-                                                          segment4angle=segment4angle, max_gap_allowed=max_gap_allowed,
-                                                          window_std=window_std, min_block_size=min_block_size)
+                                                          segment4angle=segment4angle,
+                                                          max_gap_allowed=max_gap_allowed,
+                                                          window_std=window_std,
+                                                          min_block_size=min_block_size)
             worm_data.switchHeadTail(is_switched_skel)
 
         worm_data.writeData()
@@ -197,6 +271,13 @@ def correctHeadTail(skeletons_file, **params):
     print_flush(
         'Head-Tail correction using worm movement finished:' +
         progress_timer.get_time_str())
+
+    # Re-orient omega fallback frames using full-image coordinates.
+    # Previous approaches failed because _omega_skeleton_fallback compares
+    # skeletons stored in different per-frame ROI coordinate systems.
+    # Reading directly from the HDF5 file gives a consistent full-image
+    # reference frame, making the tail-stability comparison reliable.
+    _correct_omega_orientation_infile(skeletons_file)
 
     with tables.File(skeletons_file, "r+") as ske_file_id:
         # Mark a succesful termination

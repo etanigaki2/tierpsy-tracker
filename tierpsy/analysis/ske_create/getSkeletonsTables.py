@@ -312,13 +312,14 @@ def trajectories2Skeletons(skeletons_file,
                 if analysis_type == "ZEBRAFISH":
                      output = _zebra_func(worm_img, skel_args, resampling_N)
                 else:
-                    _, worm_cnt, _ = getWormMask(worm_img,
-                                                 row_data['threshold'],
-                                                 strel_size,
-                                                 min_blob_area=row_data['area'] / 2,
-                                                 is_light_background = is_light_background)
-                    # get skeletons
-                    output = getSkeleton(worm_cnt, prev_skeleton[worm_index], resampling_N, **skel_args)
+                    worm_mask, worm_cnt, _ = getWormMask(worm_img,
+                                                         row_data['threshold'],
+                                                         strel_size,
+                                                         min_blob_area=row_data['area'] / 2,
+                                                         is_light_background=is_light_background)
+                    # get skeletons; pass worm_mask so the omega-turn fallback can use it
+                    output = getSkeleton(worm_cnt, prev_skeleton[worm_index], resampling_N,
+                                         worm_mask=worm_mask, **skel_args)
 
 
 

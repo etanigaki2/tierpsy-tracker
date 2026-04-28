@@ -308,47 +308,80 @@ class BatchProcessing_GUI(QMainWindow):
         progress = AnalysisProgress(analysis_worker)
         progress.exec_()
 
-        self._run_skel_error_report(process_args)
+        self._run_post_processing_reports(process_args)
 
-    def _run_skel_error_report(self, process_args):
+    def _run_post_processing_reports(self, process_args):
         results_dir = process_args.get('results_dir_root', '')
         if not results_dir or not os.path.isdir(results_dir):
             return
 
-        json_file = process_args.get('json_file', '')
+        import importlib
+        import traceback
+        real_data_dir = os.path.expanduser('~/real_data')
+        if real_data_dir not in sys.path:
+            sys.path.insert(0, real_data_dir)
 
-        # Extract trailing number from the JSON filename (e.g. parameterMod17 → "17")
-        stem = os.path.splitext(os.path.basename(json_file))[0]
-        match = re.search(r'(\d+)\D*$', stem)
-        suffix = match.group(1) if match else ''
-
-        # Save next to the JSON file; fall back to the results dir if no JSON
-        if json_file and os.path.isfile(json_file):
-            out_dir = os.path.dirname(os.path.abspath(json_file))
-        else:
-            out_dir = results_dir
-
-        csv_name = f'skel_error_report{suffix}.csv'
-        csv_path = os.path.join(out_dir, csv_name)
-
+        # --- skeletonisation error report ---
+        skel_csv  = None
+        skel_err  = None
         try:
-            # skel_error_report.py lives alongside run_batch.sh
-            skel_report_dir = os.path.expanduser('~/real_data')
-            if skel_report_dir not in sys.path:
-                sys.path.insert(0, skel_report_dir)
-            from skel_error_report import generate_report_to_file
-            generate_report_to_file([results_dir], csv_path)
+            import skel_error_report
+            importlib.reload(skel_error_report)
+            skel_csv = skel_error_report.generate_report_to_file([results_dir])
+        except Exception:
+            skel_err = traceback.format_exc()
+            print(skel_err)
 
-            QMessageBox.information(
-                self,
-                'Skeletonisation Report',
-                f'Report saved to:\n{csv_path}',
-                QMessageBox.Ok)
-        except Exception as e:
+        # --- patch omega NaN frames in featuresN so viewer shows them ---
+        try:
+            import patch_omega_featuresN
+            importlib.reload(patch_omega_featuresN)
+            n_patched = patch_omega_featuresN.patch_results_dir(results_dir)
+            print(f"Omega patch: {n_patched} frames restored in featuresN")
+        except Exception:
+            import traceback
+            print("Omega featuresN patch failed:\n" + traceback.format_exc())
+
+        # --- omega skeleton validation report ---
+        omega_csv = None
+        omega_err = None
+        try:
+            import omega_skel_validator
+            importlib.reload(omega_skel_validator)
+            omega_csv = omega_skel_validator.run_validation([results_dir])
+        except Exception:
+            omega_err = traceback.format_exc()
+            print(omega_err)
+
+        # --- single combined popup ---
+        errors = []
+        lines  = ['Batch processing complete.\n']
+
+        if skel_csv:
+            lines.append(f'Skeletonisation error report:\n  {skel_csv}')
+        elif skel_err:
+            errors.append(f'Skeletonisation report failed:\n{skel_err}')
+        else:
+            errors.append('Skeletonisation report: no skeleton files found.')
+
+        if omega_csv:
+            lines.append(f'Omega skeleton validation:\n  {omega_csv}')
+        elif omega_err:
+            errors.append(f'Omega validation failed:\n{omega_err}')
+        else:
+            errors.append('Omega validation: no skeleton files found.')
+
+        if errors:
             QMessageBox.warning(
                 self,
-                'Skeletonisation Report Failed',
-                f'Batch processing finished, but the skeletonisation error report could not be generated:\n{e}',
+                'Batch Processing Reports',
+                '\n\n'.join(lines + [''] + errors),
+                QMessageBox.Ok)
+        else:
+            QMessageBox.information(
+                self,
+                'Batch Processing Reports',
+                '\n\n'.join(lines),
                 QMessageBox.Ok)
 
 if __name__ == '__main__':

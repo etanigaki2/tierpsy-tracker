@@ -17,6 +17,221 @@ from .cleanWorm import circSmooth, extremaPeaksCircDist
 # wrappers around C functions
 from .cython_files.circCurvature import circCurvature
 
+
+def _extract_longest_skeleton_path(thin):
+    """
+    Given a binary thinned skeleton image, return (x, y) skeleton points as
+    the longest path between the two geometrically farthest endpoints.
+
+    Uses two-pass BFS (graph diameter on a tree) so short stub branches that
+    appear at the pinch point of an omega turn are automatically excluded.
+    Returns None if fewer than 3 skeleton pixels are found.
+
+    Ref: Zhang & Suen (1984); Cormen et al. (2009)
+    """
+    ys, xs = np.where(thin)
+    if len(xs) < 3:
+        return None
+
+    pt_set = set(zip(ys.tolist(), xs.tolist()))
+
+    def _neighbors(r, c):
+        return [(r + dr, c + dc)
+                for dr in (-1, 0, 1)
+                for dc in (-1, 0, 1)
+                if (dr, dc) != (0, 0) and (r + dr, c + dc) in pt_set]
+
+    adj = {pt: _neighbors(*pt) for pt in pt_set}
+
+    endpoints = [pt for pt, nbrs in adj.items() if len(nbrs) == 1]
+    if len(endpoints) < 2:
+        pts_list = list(pt_set)
+        endpoints = [pts_list[0], pts_list[len(pts_list) // 2]]
+
+    def _bfs(start):
+        parent = {start: None}
+        queue = [start]
+        tail = start
+        for curr in queue:
+            tail = curr
+            for nbr in adj[curr]:
+                if nbr not in parent:
+                    parent[nbr] = curr
+                    queue.append(nbr)
+        return tail, parent
+
+    end1, _ = _bfs(endpoints[0])
+    end2, parents = _bfs(end1)
+
+    path = []
+    curr = end2
+    while curr is not None:
+        path.append(curr)
+        curr = parents[curr]
+    path.reverse()
+
+    # (row, col) -> (x, y) to match OpenCV contour convention
+    return np.array([(c, r) for r, c in path], dtype=np.float64)
+
+
+def _compute_sides_and_widths(skeleton_rs, worm_mask):
+    """
+    For each resampled skeleton point cast perpendicular rays outward until
+    the worm mask boundary is reached, recording side contact points and width.
+
+    Fully vectorised over all skeleton points and ray steps using NumPy array
+    indexing — no Python loops.  Ray step size is 0.5 px.
+
+    Two fixes for omega turns:
+      1. Tangent computed over a wider window (±4 points instead of ±1) so the
+         perpendicular direction remains stable at tight curves.  At a 1-step
+         central difference, points on opposite sides of a sharp bend give a
+         tangent that points *across* the curve rather than along it, sending
+         rays in the wrong direction entirely.
+      2. Ray length capped at 3× the distance-transform half-width at each
+         skeleton point.  The old cap of max(h,w)/2 ≈ 125 px let wrongly-
+         directed rays travel 7× the worm body width and exit far outside the
+         body, which is why contour lines appeared outside the worm in Image 9.
+
+    Ref: normal ray intersection — Yemini et al. (2013)
+    """
+    from scipy.ndimage import distance_transform_edt
+
+    h, w = worm_mask.shape
+    n = len(skeleton_rs)
+
+    # --- tangents over a wider window to stabilise tight curves ---
+    win = min(4, (n - 1) // 2)          # ±win points; shrink near endpoints
+    tangents = np.empty_like(skeleton_rs)
+    for i in range(n):
+        lo = max(0, i - win)
+        hi = min(n - 1, i + win)
+        tangents[i] = skeleton_rs[hi] - skeleton_rs[lo]
+    norms = np.linalg.norm(tangents, axis=1, keepdims=True)
+    norms[norms < 1e-9] = 1.0
+    tangents /= norms
+    perps = np.column_stack([-tangents[:, 1], tangents[:, 0]])  # (n, 2)
+
+    px = skeleton_rs[:, 0]   # col  (n,)
+    py = skeleton_rs[:, 1]   # row  (n,)
+    dx = perps[:, 0]
+    dy = perps[:, 1]
+
+    # --- per-point ray cap from distance transform ---
+    # dist[r,c] = distance to nearest background pixel = local half-width
+    dist = distance_transform_edt(worm_mask)
+    col_sk = np.clip(np.round(px).astype(np.int32), 0, w - 1)
+    row_sk = np.clip(np.round(py).astype(np.int32), 0, h - 1)
+    half_widths = dist[row_sk, col_sk]                   # (n,)
+    # allow up to 3× the local half-width so small misalignments are handled
+    max_per_pt  = np.maximum(half_widths * 3.0, 5.0)    # (n,) at least 5 px
+
+    # --- ray sampling grid ---
+    # Use the largest per-point cap as the global grid length
+    global_max = float(np.max(max_per_pt))
+    t_vals = np.arange(0.5, global_max, 0.5)   # (T,)
+    T = len(t_vals)
+
+    # Broadcast to (n, T)
+    t_grid = t_vals[np.newaxis, :]            # (1, T)
+
+    def _find_exit(sign):
+        """
+        Cast rays in direction sign*(dx, dy) for all n skeleton points.
+        Returns (d, side_pts) where d[i] is the distance to the boundary
+        and side_pts[i] is the (x, y) contact point.
+        """
+        ray_x = px[:, np.newaxis] + sign * dx[:, np.newaxis] * t_grid   # (n, T)
+        ray_y = py[:, np.newaxis] + sign * dy[:, np.newaxis] * t_grid   # (n, T)
+
+        col = np.clip(np.round(ray_x).astype(np.int32), 0, w - 1)       # (n, T)
+        row = np.clip(np.round(ray_y).astype(np.int32), 0, h - 1)       # (n, T)
+
+        # A ray step is "inside" only when in-bounds, within the mask,
+        # AND within the per-point distance cap (prevents rays from
+        # travelling through the interior of omega loops).
+        in_bounds  = ((ray_x >= 0) & (ray_x < w) &
+                      (ray_y >= 0) & (ray_y < h))                        # (n, T)
+        within_cap = t_grid <= max_per_pt[:, np.newaxis]                 # (n, T)
+        inside     = in_bounds & within_cap & (worm_mask[row, col] > 0)  # (n, T)
+
+        exited   = np.any(~inside, axis=1)                               # (n,)
+        exit_idx = np.where(exited, np.argmax(~inside, axis=1), T - 1)
+        d        = t_vals[exit_idx]                                       # (n,)
+
+        side_x   = px + sign * dx * d
+        side_y   = py + sign * dy * d
+        side_pts = np.column_stack([side_x, side_y])
+
+        return d, side_pts
+
+    d1, cnt_side1 = _find_exit(+1)
+    d2, cnt_side2 = _find_exit(-1)
+    cnt_widths    = d1 + d2
+
+    return cnt_side1, cnt_side2, cnt_widths
+
+
+def _omega_skeleton_fallback(worm_mask, prev_skeleton, resampling_N):
+    """
+    Morphological-thinning fallback for omega turns and other self-touching
+    poses where contour2Skeleton fails (errors 104, 105, or 106).
+
+    During an omega turn the worm folds its head close to its mid-body,
+    making one contour side much shorter than the other and triggering
+    error 106 (isHeadTailTouching).  This fallback:
+      1. Skeletonizes the binary mask via morphological thinning (Lee et al., 1994).
+      2. Extracts the longest path between skeleton endpoints with two-pass BFS,
+         discarding short stub branches at the pinch point.
+      3. Resamples to resampling_N equidistant points.
+      4. Computes contour sides and widths via perpendicular ray casting.
+      5. Orients the skeleton consistently with prev_skeleton.
+
+    Returns the same 6-tuple as getSkeleton, or None on failure.
+    """
+    try:
+        from skimage.morphology import skeletonize as morph_skeletonize
+    except ImportError:
+        return None
+
+    thin = morph_skeletonize(worm_mask > 0)
+    skeleton_raw = _extract_longest_skeleton_path(thin)
+    if skeleton_raw is None or len(skeleton_raw) < resampling_N:
+        return None
+
+    skeleton, ske_len, _ = resample_curve(skeleton_raw, resampling_N)
+    if skeleton is None:
+        return None
+
+    if prev_skeleton.size > 0 and prev_skeleton.shape == skeleton.shape:
+        # During an omega turn the head sweeps a large arc (80+ px per frame)
+        # while the tail is nearly stationary (~4 px).  Comparing the whole
+        # skeleton (as orientWorm does) or just the head region is unreliable
+        # because the head has moved so far.  Instead compare BOTH endpoints
+        # simultaneously against the previous frame's head AND tail:
+        #   correct:  skel[0]≈prev_head  AND  skel[-1]≈prev_tail
+        #   flipped:  skel[0]≈prev_tail  AND  skel[-1]≈prev_head
+        # The tail barely moves during an omega turn, giving a very strong signal.
+        prev_head = prev_skeleton[0]
+        prev_tail = prev_skeleton[-1]
+        A = skeleton[0]
+        B = skeleton[-1]
+        score_correct = np.sum((A - prev_head) ** 2) + np.sum((B - prev_tail) ** 2)
+        score_flipped = np.sum((B - prev_head) ** 2) + np.sum((A - prev_tail) ** 2)
+        if score_flipped < score_correct:
+            skeleton = skeleton[::-1]
+
+    cnt_side1, cnt_side2, cnt_widths = _compute_sides_and_widths(skeleton, worm_mask)
+    cnt_area = float(np.sum(worm_mask))
+
+    return (skeleton.astype(np.float32),
+            ske_len,
+            cnt_side1.astype(np.float32),
+            cnt_side2.astype(np.float32),
+            cnt_widths.astype(np.float32),
+            cnt_area)
+
+
 errMsg = {104 : '''The worm has 3 or more low-frequency sampled convexities
         sharper than 90 degrees (possible head/tail points).''',
           105 : '''The worm contour has less than 2 high-frequency sampled
@@ -278,21 +493,25 @@ def resampleAll(skeleton, cnt_side1, cnt_side2, cnt_widths, resampling_N):
     return skeleton, ske_len, cnt_side1, cnt_side2, cnt_widths
 
 
-def getSkeleton(worm_cnt, prev_skeleton=np.zeros(0), resampling_N=49, 
-                num_segments = 24, head_angle_thresh=60):
+def getSkeleton(worm_cnt, prev_skeleton=np.zeros(0), resampling_N=49,
+                num_segments=24, head_angle_thresh=60, worm_mask=None):
     '''
     resampling_N -> The final number of points the skeleton, and each contour will have.
-    num_segments -> number of segments used to calculate the skeleton curvature 
-        (or half the number of segments used for the contour curvature). 
+    num_segments -> number of segments used to calculate the skeleton curvature
+        (or half the number of segments used for the contour curvature).
         Reduced for rounder objects and decreased for sharper organisms.
-        
+
     head_angle_thresh -> the threshold to consider a peak on the curvature as the head or tail.
+
+    worm_mask -> optional binary mask of the worm (same ROI coordinates as worm_cnt).
+        When provided and contour2Skeleton fails (e.g. during an omega turn), a
+        morphological-thinning fallback is attempted before returning empty arrays.
     '''
     n_output_param = 6  # number of expected output parameters
 
     if worm_cnt.size == 0:
         return (n_output_param) * [np.zeros(0)]
-        
+
     assert isinstance(
         worm_cnt,
         np.ndarray) and worm_cnt.ndim == 2 and worm_cnt.shape[1] == 2
@@ -300,9 +519,13 @@ def getSkeleton(worm_cnt, prev_skeleton=np.zeros(0), resampling_N=49,
     # make sure the worm contour is float
     worm_cnt = worm_cnt.astype(np.float32)
     skeleton, cnt_side1, cnt_side2, cnt_widths, err_msg = \
-    contour2Skeleton(worm_cnt, num_segments, head_angle_thresh)
+        contour2Skeleton(worm_cnt, num_segments, head_angle_thresh)
 
     if skeleton.size == 0:
+        if worm_mask is not None:
+            fallback = _omega_skeleton_fallback(worm_mask, prev_skeleton, resampling_N)
+            if fallback is not None:
+                return fallback
         return (n_output_param) * [np.zeros(0)]
 
     # resample curves

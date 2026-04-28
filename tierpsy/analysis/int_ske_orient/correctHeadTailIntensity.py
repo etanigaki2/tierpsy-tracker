@@ -543,6 +543,15 @@ def correctHeadTailIntensity(
         ' Head-Tail correction using intensity profiles finished: ' +
         progress_timer.get_time_str())
 
+    # Re-apply omega fallback orientation correction after INT_SKE_ORIENT.
+    # INT_SKE_ORIENT uses intensity profiles to orient head/tail and can
+    # re-flip omega frames that SKE_ORIENT already corrected.  Running the
+    # correction here (in full-image coordinates) ensures it is the final
+    # orientation step before FEAT_INIT.
+    from tierpsy.analysis.ske_orient.checkHeadOrientation import (
+        _correct_omega_orientation_infile)
+    _correct_omega_orientation_infile(skeletons_file)
+
     # return bad_worms, switched_blocks
 
 if __name__ == '__main__':
